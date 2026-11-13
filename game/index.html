@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EF-018 VALIANT — MVP-2 新東京可破壞沙盒</title>
+  <style>
+    * { box-sizing: border-box; user-select: none; }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #090e16; color: #e6f2ff;
+      font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+    }
+    #viewport { position: fixed; inset: 0; }
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; width: 28px; height: 28px;
+      transform: translate(-50%, -50%); pointer-events: none;
+      border: 2px solid rgba(85, 246, 255, 0.78); border-radius: 50%;
+      box-shadow: 0 0 12px rgba(85, 246, 255, 0.5);
+    }
+    #crosshair::after {
+      content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
+      transform: translate(-50%, -50%); background: #55f6ff; border-radius: 50%;
+    }
+    /* Panoramic FPS Cockpit Visor Overlay */
+    #cockpit-visor {
+      position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity 0.22s ease;
+      background:
+        radial-gradient(ellipse at center, transparent 58%, rgba(2, 12, 22, 0.55) 100%),
+        repeating-linear-gradient(0deg, rgba(85, 246, 255, 0.03) 0px, rgba(85, 246, 255, 0.03) 1px, transparent 1px, transparent 4px);
+    }
+    body.fps-mode #cockpit-visor { opacity: 1; }
+    #cockpit-visor svg { width: 100%; height: 100%; opacity: 0.7; }
+
+    #hud-top {
+      position: fixed; top: 14px; left: 16px; right: 16px; pointer-events: none;
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+      z-index: 5;
+    }
+    .panel {
+      background: rgba(10, 17, 27, 0.76); backdrop-filter: blur(8px);
+      border: 1px solid rgba(85, 246, 255, 0.28); border-radius: 8px;
+      padding: 10px 14px; pointer-events: auto;
+    }
+    .title { font-size: 13px; letter-spacing: 1px; color: #70e8ff; font-weight: 700; margin-bottom: 6px; }
+    .bar-wrap { width: 220px; height: 8px; background: rgba(255,255,255,0.12); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+    .bar-fill { height: 100%; width: 100%; transition: width 0.08s linear; }
+    #hud-en-fill { background: linear-gradient(90deg, #00b8ff, #55f6ff); }
+    #hud-dummy-fill { background: linear-gradient(90deg, #ff512f, #ffae34); }
+    #hud-stats, #hud-wpns { font-size: 12px; color: #c9d8e8; line-height: 1.5; }
+    #controls-help { font-size: 11px; color: #9eb4cc; line-height: 1.65; max-width: 340px; }
+    #controls-help b { color: #70e8ff; }
+    #skin-dock {
+      position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 5;
+    }
+    #skin-bar { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+    .skin-chip {
+      display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; color: #dbe9f8;
+      background: rgba(15, 24, 38, 0.85); border: 1px solid rgba(112, 232, 255, 0.28);
+    }
+    .skin-chip.active { border-color: #55f6ff; background: rgba(24, 58, 86, 0.92); color: #fff; }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.4); }
+    #diy-bar { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #b7cae0; }
+    #diy-bar input[type="color"] { width: 26px; height: 20px; border: none; background: transparent; cursor: pointer; }
+    #toast {
+      position: fixed; top: 88px; left: 50%; transform: translateX(-50%);
+      padding: 8px 16px; border-radius: 6px; background: rgba(8, 22, 36, 0.92);
+      border: 1px solid #55f6ff; color: #e8fcff; font-size: 13px;
+      opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 15;
+    }
+    #toast.show { opacity: 1; }
+    #loading-banner {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: #090e16; color: #70e8ff; font-size: 18px; letter-spacing: 1px; z-index: 20;
+    }
+    #pause-overlay {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      background: rgba(5, 10, 18, 0.72); backdrop-filter: blur(8px); z-index: 30;
+    }
+    .pause-card {
+      width: 350px; padding: 22px; border-radius: 10px;
+      background: rgba(16, 26, 40, 0.95); border: 1px solid rgba(85, 246, 255, 0.45);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .pause-card h2 { margin: 0 0 6px; font-size: 18px; color: #70e8ff; letter-spacing: 1px; }
+    .pause-card button {
+      padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(85, 246, 255, 0.4);
+      background: rgba(28, 48, 72, 0.85); color: #eef7ff; cursor: pointer; font-size: 13px; text-align: left;
+    }
+    .pause-card button:hover { background: rgba(44, 86, 126, 0.95); }
+    .vol-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #b7cae0; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="loading-banner">正在載入 EF-018 VALIANT 3D 模型、HDR 輝光與新東京都市...</div>
+  <div id="viewport"></div>
+
+  <div id="cockpit-visor">
+    <svg viewBox="0 0 1280 720" preserveAspectRatio="none">
+      <path d="M 380 360 A 260 260 0 0 1 520 140" stroke="#55f6ff" stroke-width="1.6" fill="none" stroke-dasharray="10 6" />
+      <path d="M 900 360 A 260 260 0 0 0 760 140" stroke="#55f6ff" stroke-width="1.6" fill="none" stroke-dasharray="10 6" />
+      <line x1="480" y1="360" x2="555" y2="360" stroke="#55f6ff" stroke-width="1.5" />
+      <line x1="725" y1="360" x2="800" y2="360" stroke="#55f6ff" stroke-width="1.5" />
+      <line x1="510" y1="300" x2="545" y2="300" stroke="#55f6ff" stroke-width="1" opacity="0.65" />
+      <line x1="735" y1="300" x2="770" y2="300" stroke="#55f6ff" stroke-width="1" opacity="0.65" />
+      <line x1="510" y1="420" x2="545" y2="420" stroke="#55f6ff" stroke-width="1" opacity="0.65" />
+      <line x1="735" y1="420" x2="770" y2="420" stroke="#55f6ff" stroke-width="1" opacity="0.65" />
+      <text x="415" y="135" fill="#70e8ff" font-size="13" font-family="monospace">PANORAMIC COCKPIT // SYNC 100%</text>
+      <text x="720" y="135" fill="#70e8ff" font-size="13" font-family="monospace">SABER SYS: ACTIVE</text>
+    </svg>
+  </div>
+
+  <div id="crosshair"></div>
+  <div id="toast"></div>
+
+  <div id="hud-top">
+    <div class="panel">
+      <div class="title">EF-018 VALIANT // TELEMETRY</div>
+      <div class="bar-wrap"><div id="hud-en-fill" class="bar-fill"></div></div>
+      <div id="hud-stats">[READY] SPD 0 km/h | ALT 0.0m | 拆樓 0 (+0 MC)</div>
+      <div id="hud-wpns" style="margin-top:4px;">[R-HAND] 光束手槍: 就緒 (LMB) | [L-HAND] 大光劍: 點燃 (RMB+LR)</div>
+    </div>
+
+    <div class="panel">
+      <div class="title">TARGET DUMMY EF-T01</div>
+      <div class="bar-wrap"><div id="hud-dummy-fill" class="bar-fill"></div></div>
+      <div id="controls-help">
+        <b>WASD</b> 鋼彈步行 &nbsp;|&nbsp; <b>Shift</b> 噴射滑行 &nbsp;|&nbsp; <b>Space</b> 跳躍／噴射飛行<br/>
+        <b>1 / 2 / 3</b> 武裝切換 (槍劍 / 槍盾 / 劍盾) &nbsp;|&nbsp; <b>按住 RMB / E</b> 舉複合盾護盾 &nbsp;|&nbsp; <b>T</b> 盾反彈開測試<br/>
+        <b>左鍵 LMB</b> 右手武器 &nbsp;|&nbsp; <b>滑鼠+右鍵 RMB</b> 左手光劍 / 防禦 &nbsp;|&nbsp; <b>C</b> 看正面 (滾輪縮放) &nbsp;|&nbsp; <b>V</b> 座艙 &nbsp;|&nbsp; <b>F/R</b> 丟撿
+      </div>
+    </div>
+  </div>
+
+  <div id="skin-dock" class="panel">
+    <div id="skin-bar"></div>
+    <div id="diy-bar">
+      <span>DIY 調色:</span>
+      <label>主裝甲 <input id="diy-primary" type="color" value="#c9d4e0" /></label>
+      <label>副裝甲 <input id="diy-secondary" type="color" value="#3c5e88" /></label>
+      <label>光劍光色 <input id="diy-saber" type="color" value="#55f6ff" /></label>
+    </div>
+  </div>
+
+  <div id="pause-overlay">
+    <div class="pause-card">
+      <h2>// TACTICAL PAUSE</h2>
+      <button id="btn-resume">▶ 返回戰場 RESUME (ESC)</button>
+      <button id="btn-toggle-cam">📷 切換 FPS 360° 座艙 (V)</button>
+      <button id="btn-orbit-front">🔍 切換 360° 正面檢視鏡頭 (C)</button>
+      <button id="btn-toggle-env">🏙️ 切換 日間東京 / 夜戰環境 (N)</button>
+      <button id="btn-reset">🔄 重置新東京建築與靶機 RESTART</button>
+      <div class="vol-row">
+        <span>🔊 音效音量</span>
+        <input id="vol-slider" type="range" min="0" max="1" step="0.05" value="0.45" />
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { bootstrapSandbox } from './client/renderer.js';
+    bootstrapSandbox();
+  </script>
+</body>
+</html>
