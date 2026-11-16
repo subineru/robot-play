@@ -1,0 +1,3 @@
+Audio assets curated from Kenney Game Assets (Impact Sounds, Sci-Fi Sounds, RPG Audio)
+Source: https://kenney.nl/assets
+License: Creative Commons Zero (CC0 1.0 Universal) - Public Domain

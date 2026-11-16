@@ -3,9 +3,132 @@
  * Applies 8 tier skins + 5-channel DIY colors onto EF-018 VALIANT without downloading extra textures.
  */
 import * as THREE from 'three';
-import { resolveEffectivePalette } from '../shared/skins.js';
+import {
+  resolveEffectivePalette,
+  getValiantBakedTextureUrls,
+  buildValiantControlMaskShaderPatch,
+} from '../shared/skins.js?v=20261116_t75e';
 
 const texCache = new Map();
+const MASK_SHADER_PATCH = buildValiantControlMaskShaderPatch();
+
+const valiantBakedState = {
+  started: false,
+  normalTex: null,
+  maskTex: null,
+  patchedMats: new Set(),
+};
+
+function syncMatBakedUniforms(mat, zPal) {
+  const uniforms = mat?.userData?.valiantMaskUniforms;
+  if (!uniforms) return;
+  const finish = zPal?.shaderFinish || 'matte';
+  uniforms.uFinishMode.value = finish === 'weathered' ? 1.0 : finish === 'chrome' || finish === 'glossy' ? 2.0 : 0.0;
+  uniforms.uWearColor.value.set(zPal?.frame || '#2b323c');
+  if (valiantBakedState.maskTex) {
+    uniforms.uValiantMask.value = valiantBakedState.maskTex;
+    uniforms.uHasValiantMask.value = 1.0;
+  }
+  if (valiantBakedState.normalTex && mat.normalMap !== valiantBakedState.normalTex) {
+    mat.normalMap = valiantBakedState.normalTex;
+    mat.normalScale?.set(0.85, 0.85);
+    mat.needsUpdate = true;
+  }
+}
+
+function ensureValiantBakedTexturesLoaded() {
+  if (valiantBakedState.started || typeof document === 'undefined') return;
+  valiantBakedState.started = true;
+  const loader = new THREE.TextureLoader();
+  const { normalUrl, maskUrl } = getValiantBakedTextureUrls();
+
+  const onTexReady = () => {
+    for (const mat of valiantBakedState.patchedMats) {
+      syncMatBakedUniforms(mat, mat.userData?.lastZonePalette);
+    }
+  };
+
+  loader.load(
+    normalUrl,
+    (tex) => {
+      tex.flipY = false;
+      tex.colorSpace = THREE.NoColorSpace;
+      valiantBakedState.normalTex = tex;
+      onTexReady();
+    },
+    undefined,
+    () => {},
+  );
+  loader.load(
+    maskUrl,
+    (tex) => {
+      tex.flipY = false;
+      tex.colorSpace = THREE.NoColorSpace;
+      valiantBakedState.maskTex = tex;
+      onTexReady();
+    },
+    undefined,
+    () => {},
+  );
+}
+
+function attachValiantControlMaskShader(mat, zPal) {
+  if (!mat) return;
+  mat.userData.lastZonePalette = zPal;
+  if (!mat.userData.valiantMaskUniforms) {
+    mat.userData.valiantMaskUniforms = {
+      uValiantMask: { value: valiantBakedState.maskTex },
+      uHasValiantMask: { value: valiantBakedState.maskTex ? 1.0 : 0.0 },
+      uFinishMode: { value: 0.0 },
+      uWearColor: { value: new THREE.Color(zPal?.frame || '#2b323c') },
+    };
+    mat.customProgramCacheKey = () => 'valiant_v3_mask';
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, mat.userData.valiantMaskUniforms);
+      shader.vertexShader = MASK_SHADER_PATCH.vertDecl + shader.vertexShader;
+      if (shader.vertexShader.includes('#include <uv_vertex>')) {
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <uv_vertex>',
+          `#include <uv_vertex>\n${MASK_SHADER_PATCH.vertUvAssign}`,
+        );
+      }
+      shader.fragmentShader = MASK_SHADER_PATCH.uniformDecl + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <map_fragment>', `#include <map_fragment>\n${MASK_SHADER_PATCH.fragDiffuse}`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>\n${MASK_SHADER_PATCH.fragRoughness}`)
+        .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>\n${MASK_SHADER_PATCH.fragMetalness}`);
+    };
+    valiantBakedState.patchedMats.add(mat);
+    mat.needsUpdate = true;
+  }
+  ensureValiantBakedTexturesLoaded();
+  syncMatBakedUniforms(mat, zPal);
+}
+
+/**
+ * Resolve anatomical / weapon / shield zone for a mesh by walking child-most ancestor tags first.
+ */
+export function resolveMeshZoneId(obj) {
+  let p = obj;
+  while (p) {
+    if (p.userData?.paintZone) return p.userData.paintZone;
+    const name = p.name || '';
+    if (name.startsWith('Shield_') || name.includes('CompositeShield') || name.includes('Shield')) {
+      return 'shields';
+    }
+    if (name.startsWith('Wpn_') || name.includes('Pistol') || name.includes('Saber') || name === 'CustomPlasmaSaber') {
+      return 'weapons';
+    }
+    if (name === 'Head' || name === 'Mesh_Head') return 'head';
+    if (name === 'ShoulderPad_L' || name === 'Arm_Upper_L' || name === 'Arm_Lower_L' || name === 'Hand_L') return 'arm_l';
+    if (name === 'ShoulderPad_R' || name === 'Arm_Upper_R' || name === 'Arm_Lower_R' || name === 'Hand_R') return 'arm_r';
+    if (name.startsWith('Leg_') || name.startsWith('Foot_')) return 'legs';
+    if (name === 'Backpack' || name.startsWith('Wing_')) return 'backpack';
+    if (name === 'Torso' || name === 'Pelvis' || name.startsWith('FrontSkirt_') || name === 'Mesh_Torso') return 'torso';
+    p = p.parent;
+  }
+  return 'torso';
+}
 
 function makeProceduralArmorTexture(palette) {
   const key = `${palette.shaderFinish}|${palette.primary}|${palette.secondary}|${palette.frame}`;
@@ -130,74 +253,105 @@ function makeProceduralArmorTexture(palette) {
  * Apply resolved skin palette + procedural finish onto loaded VALIANT meshes and materials.
  */
 export function applyMechaSkin(mechaRoot, skinId = 'SKIN-01', customPalette = null, extraRefs = null) {
-  const palette = resolveEffectivePalette(skinId, customPalette);
-  const armorTex = makeProceduralArmorTexture(palette);
+  const palette = resolveEffectivePalette(skinId, customPalette, 'all');
+  const zonePaletteCache = new Map();
+  const getZonePal = (zid) => {
+    if (!zonePaletteCache.has(zid)) {
+      zonePaletteCache.set(zid, resolveEffectivePalette(skinId, customPalette, zid));
+    }
+    return zonePaletteCache.get(zid);
+  };
 
-  const visited = new Set();
+  const hasBakedMasks = extraRefs?.hasBakedMasks ?? mechaRoot?.userData?.hasBakedMasks ?? true;
+
   mechaRoot.traverse((obj) => {
     if (!obj.isMesh || !obj.material) return;
+    if (obj.material.isShaderMaterial) return;
+
+    if (!obj.userData._zoneMatCloned) {
+      obj.material = Array.isArray(obj.material)
+        ? obj.material.map((m) => (m?.isShaderMaterial ? m : m.clone()))
+        : obj.material.clone();
+      obj.userData._zoneMatCloned = true;
+    }
+
+    const zoneId = resolveMeshZoneId(obj);
+    const zPal = getZonePal(zoneId);
+    const armorTex = makeProceduralArmorTexture(zPal);
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
     const isSaberBlade = obj.name.includes('HyperBeamSaber_Blade');
+    const isValiantBakedMesh =
+      hasBakedMasks &&
+      (obj.name.startsWith('Mesh_') || obj.name.startsWith('Hardpoint_Cap_')) &&
+      Boolean(obj.geometry?.attributes?.uv);
 
     for (const mat of mats) {
-      if (visited.has(mat)) continue;
-      visited.add(mat);
-
-      const mname = mat.name || '';
+      if (!mat || mat.isShaderMaterial) continue;
+      const mname = mat.name || obj.userData?.paintRole || '';
+      if (!isValiantBakedMesh && mat.userData?.valiantMaskUniforms) {
+        mat.userData.valiantMaskUniforms.uHasValiantMask.value = 0.0;
+        mat.normalMap = null;
+      }
       if (isSaberBlade) {
-        // White-hot plasma core inside GLB blade mesh so it glows vividly under HDR bloom
+        const wpnPal = getZonePal('weapons');
         mat.color?.set('#ffffff');
-        mat.emissive?.set(palette.saber);
+        mat.emissive?.set(wpnPal.saber);
         mat.emissiveIntensity = 3.8;
       } else if (mname === 'Mat_Armor_Primary') {
         mat.color?.set('#ffffff');
         mat.map = armorTex;
-        mat.metalness = palette.metallic;
-        mat.roughness = palette.roughness;
+        mat.metalness = zPal.metallic;
+        mat.roughness = zPal.roughness;
+        if (isValiantBakedMesh) attachValiantControlMaskShader(mat, zPal);
       } else if (mname === 'Mat_Armor_Secondary') {
-        mat.color?.set(palette.secondary);
+        mat.color?.set(zPal.secondary);
         mat.map = null;
-        mat.metalness = Math.min(1, palette.metallic + 0.04);
-        mat.roughness = Math.max(0.1, palette.roughness - 0.04);
+        mat.metalness = Math.min(1, zPal.metallic + 0.04);
+        mat.roughness = Math.max(0.08, zPal.roughness - 0.04);
+        if (isValiantBakedMesh) attachValiantControlMaskShader(mat, zPal);
       } else if (mname === 'Mat_Frame_DarkMetal' || mname === 'Mat_Alu_Brushed') {
         if (mname === 'Mat_Frame_DarkMetal') {
-          mat.color?.set(palette.frame);
+          mat.color?.set(zPal.frame);
         }
         mat.metalness = 0.86;
         mat.roughness = 0.42;
+        if (isValiantBakedMesh) attachValiantControlMaskShader(mat, zPal);
       } else if (mname === 'Mat_Glow_Sensor') {
-        mat.color?.set(palette.sensor);
-        mat.emissive?.set(palette.sensor);
+        mat.color?.set(zPal.sensor);
+        mat.emissive?.set(zPal.sensor);
         mat.emissiveIntensity = 3.1;
       } else if (mname === 'Mat_Glow_Thruster') {
-        // Fixed 1000 deg C combustion throat glow inside nozzle cones (independent of paint skin)
-        mat.color?.set('#ff9b42');
-        mat.emissive?.set('#ff5510');
+        const bpPal = getZonePal(zoneId === 'backpack' ? 'backpack' : zoneId);
+        const isDefaultStd = bpPal.id === 'SKIN-01' && bpPal.thruster === '#22aaff';
+        mat.color?.set(isDefaultStd ? '#ff9b42' : bpPal.thruster);
+        mat.emissive?.set(isDefaultStd ? '#ff5510' : bpPal.thruster);
         mat.emissiveIntensity = 2.1;
       }
       mat.needsUpdate = true;
     }
   });
 
+  const wpnPal = getZonePal('weapons');
+  const torsoPal = getZonePal('torso');
   if (extraRefs) {
-    if (extraRefs.frameMat) extraRefs.frameMat.color?.set(palette.secondary);
+    if (extraRefs.frameMat) extraRefs.frameMat.color?.set(torsoPal.secondary);
     if (extraRefs.hudMat) {
-      extraRefs.hudMat.color?.set(palette.sensor);
-      extraRefs.hudMat.emissive?.set(palette.sensor);
+      extraRefs.hudMat.color?.set(torsoPal.sensor);
+      extraRefs.hudMat.emissive?.set(torsoPal.sensor);
     }
     if (extraRefs.saberShaderMat?.uniforms?.uSaberColor) {
-      extraRefs.saberShaderMat.uniforms.uSaberColor.value.set(palette.saber);
+      extraRefs.saberShaderMat.uniforms.uSaberColor.value.set(wpnPal.saber);
     }
     if (extraRefs.saberAuraMat) {
       if (extraRefs.saberAuraMat.uniforms?.uSaberColor) {
-        extraRefs.saberAuraMat.uniforms.uSaberColor.value.set(palette.saber);
+        extraRefs.saberAuraMat.uniforms.uSaberColor.value.set(wpnPal.saber);
       } else {
-        extraRefs.saberAuraMat.color?.set(palette.saber);
-        extraRefs.saberAuraMat.emissive?.set(palette.saber);
+        extraRefs.saberAuraMat.color?.set(wpnPal.saber);
+        extraRefs.saberAuraMat.emissive?.set(wpnPal.saber);
       }
     }
     if (extraRefs.saberLight) {
-      extraRefs.saberLight.color?.set(palette.saber);
+      extraRefs.saberLight.color?.set(wpnPal.saber);
     }
   }
 
